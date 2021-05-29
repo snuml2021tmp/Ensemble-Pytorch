@@ -48,6 +48,12 @@ def _parallel_fit_per_epoch(
 
     for batch_idx, (data, target) in enumerate(train_loader):
 
+        H = data.size(-2)
+        W = data.size(-1)
+        seq_len = 10
+        channel = 1
+        data = data.view(data.size(0)//seq_len, seq_len, channel, H, W)
+        target = target.view(target.size(0)//seq_len, seq_len)
         batch_size = data.size(0)
         data, target = data.to(device), target.to(device)
 
@@ -60,6 +66,11 @@ def _parallel_fit_per_epoch(
         sampling_target = target[sampling_mask]
 
         optimizer.zero_grad()
+        # Added for ML2021
+        sampling_data = sampling_data.view(-1, channel, H, W)
+        sampling_target = sampling_target.view(-1)
+        sampling_data = (sampling_data, sampling_target)
+        
         sampling_output = estimator(sampling_data)
         loss = criterion(sampling_output, sampling_target)
         loss.backward()
@@ -70,7 +81,7 @@ def _parallel_fit_per_epoch(
 
             # Classification
             if is_classification:
-                subsample_size = sampling_data.size(0)
+                subsample_size = sampling_output.size(0)
                 _, predicted = torch.max(sampling_output.data, 1)
                 correct = (predicted == sampling_target).sum().item()
 

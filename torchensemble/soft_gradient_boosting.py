@@ -127,9 +127,10 @@ def _parallel_compute_pseudo_residual(
 
     # Classification
     if is_classification:
-        residual = op.pseudo_residual_classification(
-            target, accumulated_output, n_outputs
-        )
+        # residual = op.pseudo_residual_classification(
+        #     target, accumulated_output, n_outputs
+        # )
+        residual = target
     # Regression
     else:
         residual = op.pseudo_residual_regression(target, accumulated_output)
@@ -209,6 +210,7 @@ class _BaseSoftGradientBoosting(BaseModule):
         test_loader=None,
         save_model=True,
         save_dir=None,
+        is_classification=True,
     ):
 
         # Instantiate base estimators and set attributes
@@ -218,9 +220,12 @@ class _BaseSoftGradientBoosting(BaseModule):
         self.n_outputs = self._decide_n_outputs(train_loader)
 
         # Utils
-        criterion = (
-            nn.MSELoss(reduction="sum") if use_reduction_sum else nn.MSELoss()
-        )
+        if not is_classification:
+            criterion = (
+                nn.MSELoss(reduction="sum") if use_reduction_sum else nn.MSELoss()
+            )
+        else:
+            criterion = nn.CrossEntropyLoss(reduction='mean')
         total_iters = 0
 
         # Set up optimizer and learning rate scheduler
@@ -240,7 +245,12 @@ class _BaseSoftGradientBoosting(BaseModule):
             for batch_idx, (data, target) in enumerate(train_loader):
 
                 data, target = data.to(self.device), target.to(self.device)
-                output = [estimator(data) for estimator in self.estimators_]
+                if not is_classification:
+                    output = [estimator(data) for estimator in self.estimators_]
+                else:
+                    # Added for ML2021
+                    data = (data, target)
+                    output = [estimator(data) for estimator in self.estimators_]
 
                 # Compute pseudo residuals in parallel
                 rets = Parallel(n_jobs=self.n_jobs)(
@@ -250,7 +260,7 @@ class _BaseSoftGradientBoosting(BaseModule):
                         i,
                         self.shrinkage_rate,
                         self.n_outputs,
-                        self.is_classification,
+                        True,
                     )
                     for i in range(self.n_estimators)
                 )
@@ -258,6 +268,7 @@ class _BaseSoftGradientBoosting(BaseModule):
                 # Compute sGBM loss
                 loss = torch.tensor(0.0, device=self.device)
                 for idx, estimator in enumerate(self.estimators_):
+
                     loss += criterion(output[idx], rets[idx])
 
                 optimizer.zero_grad()
@@ -267,8 +278,18 @@ class _BaseSoftGradientBoosting(BaseModule):
                 # Print training status
                 if batch_idx % log_interval == 0:
                     with torch.no_grad():
-                        msg = "Epoch: {:03d} | Batch: {:03d} | RegLoss: {:.5f}"
-                        self.logger.info(msg.format(epoch, batch_idx, loss))
+                        size = 0
+                        correct = 0
+                        for idx, estimator in enumerate(self.estimators_):
+                            size += output[idx].size(0)
+                            _, predicted = torch.max(output[idx], 1)
+                            correct += (predicted == rets[idx]).sum().item()
+
+                        msg = (
+                            "Epoch: {:03d} | Batch: {:03d}"
+                            " | Loss: {:.5f} | Correct: {:d}/{:d}"
+                        )
+                        self.logger.info(msg.format(epoch, batch_idx, loss, correct, size))
                         if self.tb_logger:
                             self.tb_logger.add_scalar(
                                 "sGBM/Train_Loss", loss, total_iters

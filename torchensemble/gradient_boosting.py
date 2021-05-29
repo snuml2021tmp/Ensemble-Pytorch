@@ -215,6 +215,7 @@ class _BaseGradientBoosting(BaseModule):
         early_stopping_rounds=2,
         save_model=True,
         save_dir=None,
+        is_classification=True,
     ):
 
         # Instantiate base estimators and set attributes
@@ -224,9 +225,12 @@ class _BaseGradientBoosting(BaseModule):
         self.n_outputs = self._decide_n_outputs(train_loader)
 
         # Utils
-        criterion = (
-            nn.MSELoss(reduction="sum") if use_reduction_sum else nn.MSELoss()
-        )
+        if not is_classification:
+            criterion = (
+                nn.MSELoss(reduction="sum") if use_reduction_sum else nn.MSELoss()
+            )
+        else:
+            criterion = nn.CrossEntropyLoss(reduction='mean')
         n_counter = 0  # a counter on early stopping
 
         for est_idx, estimator in enumerate(self.estimators_):
@@ -254,23 +258,39 @@ class _BaseGradientBoosting(BaseModule):
 
                     # Compute the learning target of the current estimator
                     residual = self._pseudo_residual(data, target, est_idx)
-
+                    
+                    # Added for ML2021
+                    data = (data, target)
+                    
                     output = estimator(data)
-                    loss = criterion(output, residual)
-
+                    if not is_classification:
+                        loss = criterion(output, residual)
+                    else:
+                        loss = criterion(output, target)
                     learner_optimizer.zero_grad()
                     loss.backward()
                     learner_optimizer.step()
 
                     # Print training status
                     if batch_idx % log_interval == 0:
-                        msg = (
-                            "Estimator: {:03d} | Epoch: {:03d} | Batch:"
-                            " {:03d} | RegLoss: {:.5f}"
-                        )
-                        self.logger.info(
-                            msg.format(est_idx, epoch, batch_idx, loss)
-                        )
+                        if not is_classification:
+                            msg = (
+                                "Estimator: {:03d} | Epoch: {:03d} | Batch:"
+                                " {:03d} | RegLoss: {:.5f}"
+                            )
+                            self.logger.info(
+                                msg.format(est_idx, epoch, batch_idx, loss)
+                            )
+                        else:
+                            _, predicted = torch.max(output.data, 1)
+                            correct = (predicted == target).sum().item()
+                            msg = (
+                                "Estimator: {:03d} | Epoch: {:03d} | Batch: {:03d}"
+                                " | Loss: {:.5f} | Correct: {:d}/{:d}"
+                            )
+                            self.logger.info(
+                                msg.format(est_idx, epoch, batch_idx, loss, correct ,output.size(0))
+                            )
                         if self.tb_logger:
                             self.tb_logger.add_scalar(
                                 "gradient_boosting/Est_{}/Train_Loss".format(
@@ -396,6 +416,7 @@ class GradientBoostingClassifier(_BaseGradientBoosting, BaseClassifier):
         early_stopping_rounds=2,
         save_model=True,
         save_dir=None,
+        is_classification=True,
     ):
         super().fit(
             train_loader=train_loader,
@@ -406,6 +427,7 @@ class GradientBoostingClassifier(_BaseGradientBoosting, BaseClassifier):
             early_stopping_rounds=early_stopping_rounds,
             save_model=save_model,
             save_dir=save_dir,
+            is_classification=True,
         )
 
     @torchensemble_model_doc(

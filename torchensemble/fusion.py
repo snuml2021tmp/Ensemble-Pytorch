@@ -97,7 +97,8 @@ class FusionClassifier(BaseClassifier):
             for batch_idx, (data, target) in enumerate(train_loader):
 
                 data, target = data.to(self.device), target.to(self.device)
-
+                # added for teacher forcing
+                data = (data, target)
                 optimizer.zero_grad()
                 output = self._forward(data)
                 loss = criterion(output, target)
@@ -116,7 +117,7 @@ class FusionClassifier(BaseClassifier):
                         )
                         self.logger.info(
                             msg.format(
-                                epoch, batch_idx, loss, correct, data.size(0)
+                                epoch, batch_idx, loss, correct, output.size(0)
                             )
                         )
                         if self.tb_logger:
