@@ -50,6 +50,9 @@ def _parallel_fit_per_epoch(
         batch_size = data.size(0)
         data, target = data.to(device), target.to(device)
         # added for ML2021
+        print(data.dtype)
+        print(data.size())
+        print(data[0].cpu().data.numpy())
         data = (data, target)
 
         optimizer.zero_grad()
