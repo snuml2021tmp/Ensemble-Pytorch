@@ -19,7 +19,7 @@ from .utils import io
 from .utils import set_module
 from .utils import operator as op
 from .utils.logging import get_tb_logger
-
+import numpy as np
 
 __all__ = ["GradientBoostingClassifier", "GradientBoostingRegressor"]
 
@@ -216,11 +216,18 @@ class _BaseGradientBoosting(BaseModule):
         save_model=True,
         save_dir=None,
         is_classification=True,
+        retrain=False,
+        loaded_optimizers=None,
+        loaded_scheduler=None,
+        loaded_epoch=0,
+        loaded_est_idx=-1,
+        loaded_best_acc=-1,
     ):
 
         # Instantiate base estimators and set attributes
-        for _ in range(self.n_estimators):
-            self.estimators_.append(self._make_estimator())
+        if not retrain:
+            for _ in range(self.n_estimators):
+                self.estimators_.append(self._make_estimator())
         self._validate_parameters(epochs, log_interval, early_stopping_rounds)
         self.n_outputs = self._decide_n_outputs(train_loader)
 
@@ -233,8 +240,12 @@ class _BaseGradientBoosting(BaseModule):
             criterion = nn.CrossEntropyLoss(reduction='mean')
         n_counter = 0  # a counter on early stopping
 
-        for est_idx, estimator in enumerate(self.estimators_):
+        if retrain:
+            self.best_acc = loaded_best_acc
 
+        for est_idx, estimator in enumerate(self.estimators_):
+            if retrain and est_idx <= loaded_est_idx:
+                continue
             # Initialize a optimizer and scheduler for each base estimator to
             # avoid unexpected dependencies.
             learner_optimizer = set_module.set_optimizer(
@@ -243,14 +254,15 @@ class _BaseGradientBoosting(BaseModule):
 
             if self.use_scheduler_:
                 learner_scheduler = set_module.set_scheduler(
-                    learner_optimizer,
-                    self.scheduler_name,
-                    **self.scheduler_args  # noqa: E501
+                    learner_optimizer, self.scheduler_name, **self.scheduler_args
                 )
-
             # Training loop
             estimator.train()
             total_iters = 0
+            if est_idx != loaded_est_idx:
+                loaded_epoch_ = 0
+            else:
+                loaded_epoch_ = loaded_epoch
             for epoch in range(epochs):
                 for batch_idx, (data, target) in enumerate(train_loader):
 
@@ -258,10 +270,10 @@ class _BaseGradientBoosting(BaseModule):
 
                     # Compute the learning target of the current estimator
                     residual = self._pseudo_residual(data, target, est_idx)
-                    
+
                     # Added for ML2021
                     data = (data, target)
-                    
+
                     output = estimator(data)
                     if not is_classification:
                         loss = criterion(output, residual)
@@ -286,10 +298,11 @@ class _BaseGradientBoosting(BaseModule):
                             correct = (predicted == target).sum().item()
                             msg = (
                                 "Estimator: {:03d} | Epoch: {:03d} | Batch: {:03d}"
-                                " | Loss: {:.5f} | Correct: {:d}/{:d}"
+                                " | LR: {:.5f} | Loss: {:.5f} | Correct: {:d}/{:d}"
                             )
                             self.logger.info(
-                                msg.format(est_idx, epoch, batch_idx, loss, correct ,output.size(0))
+                                msg.format(est_idx, epoch, batch_idx, learner_scheduler.get_last_lr()[0],
+                                           loss, correct ,output.size(0))
                             )
                         if self.tb_logger:
                             self.tb_logger.add_scalar(
@@ -307,6 +320,9 @@ class _BaseGradientBoosting(BaseModule):
             # Validation
             if test_loader:
                 flag = self._handle_early_stopping(test_loader, est_idx)
+                if save_model:
+                    io.save(self, 0, [learner_optimizer], learner_scheduler, save_dir, self.logger,
+                            best_acc=self.best_acc, est_idx=est_idx)
 
                 if flag:
                     n_counter += 1
@@ -328,11 +344,10 @@ class _BaseGradientBoosting(BaseModule):
                     # Reset the counter if the performance improves
                     n_counter = 0
 
+
         # Post-processing
         msg = "The optimal number of base estimators: {}"
         self.logger.info(msg.format(len(self.estimators_)))
-        if save_model:
-            io.save(self, save_dir, self.logger)
 
 
 @_gradient_boosting_model_doc(
@@ -417,6 +432,12 @@ class GradientBoostingClassifier(_BaseGradientBoosting, BaseClassifier):
         save_model=True,
         save_dir=None,
         is_classification=True,
+        retrain=False,
+        loaded_optimizers=None,
+        loaded_scheduler=None,
+        loaded_epoch=0,
+        loaded_est_idx=-1,
+        loaded_best_acc=-1,
     ):
         super().fit(
             train_loader=train_loader,
@@ -428,6 +449,12 @@ class GradientBoostingClassifier(_BaseGradientBoosting, BaseClassifier):
             save_model=save_model,
             save_dir=save_dir,
             is_classification=True,
+            retrain=retrain,
+            loaded_optimizers=loaded_optimizers,
+            loaded_scheduler=loaded_scheduler,
+            loaded_epoch=loaded_epoch,
+            loaded_est_idx=loaded_est_idx,
+            loaded_best_acc=loaded_best_acc,
         )
 
     @torchensemble_model_doc(

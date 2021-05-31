@@ -15,7 +15,7 @@ from ._base import torchensemble_model_doc
 from .utils import io
 from .utils import set_module
 from .utils import operator as op
-
+import numpy as np
 
 __all__ = ["FusionClassifier", "FusionRegressor"]
 
@@ -69,30 +69,45 @@ class FusionClassifier(BaseClassifier):
         test_loader=None,
         save_model=True,
         save_dir=None,
+        retrain=False,
+        loaded_optimizers=None,
+        loaded_scheduler=None,
+        loaded_epoch=0,
+        loaded_est_idx=-1,
+        loaded_best_acc=-1,
     ):
 
         # Instantiate base estimators and set attributes
-        for _ in range(self.n_estimators):
-            self.estimators_.append(self._make_estimator())
+        if not retrain:
+            for _ in range(self.n_estimators):
+                self.estimators_.append(self._make_estimator())
         self._validate_parameters(epochs, log_interval)
         self.n_outputs = self._decide_n_outputs(train_loader)
-        optimizer = set_module.set_optimizer(
-            self, self.optimizer_name, **self.optimizer_args
-        )
+        if not retrain:
+            optimizer = set_module.set_optimizer(
+                self, self.optimizer_name, **self.optimizer_args
+            )
+        else:
+            assert loaded_optimizers is not None
+            optimizer = loaded_optimizers[0]  # only one
 
         # Set the scheduler if `set_scheduler` was called before
         if self.use_scheduler_:
-            self.scheduler_ = set_module.set_scheduler(
-                optimizer, self.scheduler_name, **self.scheduler_args
-            )
+            if not retrain:
+                self.scheduler_ = set_module.set_scheduler(
+                    optimizer, self.scheduler_name, **self.scheduler_args
+                )
+            else:
+                assert loaded_scheduler is not None
+                self.scheduler_ = loaded_scheduler
 
         # Utils
         criterion = nn.CrossEntropyLoss()
-        best_acc = 0.0
+        best_acc = 0.0 if loaded_best_acc == -1 else loaded_best_acc
         total_iters = 0
 
         # Training loop
-        for epoch in range(epochs):
+        for epoch in np.array(list(range(epochs - loaded_epoch))) + loaded_epoch:
             self.train()
             for batch_idx, (data, target) in enumerate(train_loader):
 
@@ -112,12 +127,12 @@ class FusionClassifier(BaseClassifier):
                         correct = (predicted == target).sum().item()
 
                         msg = (
-                            "Epoch: {:03d} | Batch: {:03d} | Loss:"
+                            "Epoch: {:03d} | Batch: {:03d} | LR: {:.5f} | Loss:"
                             " {:.5f} | Correct: {:d}/{:d}"
                         )
                         self.logger.info(
                             msg.format(
-                                epoch, batch_idx, loss, correct, output.size(0)
+                                epoch, batch_idx, self.scheduler_.get_last_lr()[0], loss, correct, output.size(0)
                             )
                         )
                         if self.tb_logger:
@@ -127,6 +142,7 @@ class FusionClassifier(BaseClassifier):
                 total_iters += 1
 
             # Validation
+            save_flag = False
             if test_loader:
                 self.eval()
                 with torch.no_grad():
@@ -143,8 +159,7 @@ class FusionClassifier(BaseClassifier):
 
                     if acc > best_acc:
                         best_acc = acc
-                        if save_model:
-                            io.save(self, save_dir, self.logger)
+                        save_flag = True
 
                     msg = (
                         "Epoch: {:03d} | Validation Acc: {:.3f}"
@@ -160,8 +175,11 @@ class FusionClassifier(BaseClassifier):
             if hasattr(self, "scheduler_"):
                 self.scheduler_.step()
 
+            if save_model and save_flag:
+                io.save(self, epoch + 1, [optimizer], self.scheduler_, save_dir, self.logger, best_acc)
+
         if save_model and not test_loader:
-            io.save(self, save_dir, self.logger)
+            io.save(self, epoch + 1, [optimizer], self.scheduler_, save_dir, self.logger, best_acc)
 
     @torchensemble_model_doc(item="classifier_evaluate")
     def evaluate(self, test_loader, return_loss=False):

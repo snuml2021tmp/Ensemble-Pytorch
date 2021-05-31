@@ -19,7 +19,7 @@ from .utils import io
 from .utils import set_module
 from .utils import operator as op
 from .utils.logging import get_tb_logger
-
+import numpy as np
 
 __all__ = ["SoftGradientBoostingClassifier", "SoftGradientBoostingRegressor"]
 
@@ -211,11 +211,18 @@ class _BaseSoftGradientBoosting(BaseModule):
         save_model=True,
         save_dir=None,
         is_classification=True,
+        retrain=False,
+        loaded_optimizers=None,
+        loaded_scheduler=None,
+        loaded_epoch=0,
+        loaded_est_idx=-1,
+        loaded_best_acc=-1,
     ):
 
         # Instantiate base estimators and set attributes
-        for _ in range(self.n_estimators):
-            self.estimators_.append(self._make_estimator())
+        if not retrain:
+            for _ in range(self.n_estimators):
+                self.estimators_.append(self._make_estimator())
         self._validate_parameters(epochs, log_interval)
         self.n_outputs = self._decide_n_outputs(train_loader)
 
@@ -229,18 +236,27 @@ class _BaseSoftGradientBoosting(BaseModule):
         total_iters = 0
 
         # Set up optimizer and learning rate scheduler
-        optimizer = set_module.set_optimizer(
-            self, self.optimizer_name, **self.optimizer_args
-        )
+        if not retrain:
+            optimizer = set_module.set_optimizer(
+                self, self.optimizer_name, **self.optimizer_args
+            )
+        else:
+            assert loaded_optimizers is not None
+            optimizer = loaded_optimizers[0]  # only one
 
         if self.use_scheduler_:
-            scheduler = set_module.set_scheduler(
-                optimizer,
-                self.scheduler_name,
-                **self.scheduler_args  # noqa: E501
-            )
+            if not retrain:
+                scheduler = set_module.set_scheduler(
+                    optimizer, self.scheduler_name, **self.scheduler_args
+                )
+            else:
+                assert loaded_scheduler is not None
+                scheduler = loaded_scheduler
 
-        for epoch in range(epochs):
+        if retrain:
+            self.best_acc = loaded_best_acc
+
+        for epoch in np.array(list(range(epochs - loaded_epoch))) + loaded_epoch:
             self.train()
             for batch_idx, (data, target) in enumerate(train_loader):
 
@@ -287,9 +303,9 @@ class _BaseSoftGradientBoosting(BaseModule):
 
                         msg = (
                             "Epoch: {:03d} | Batch: {:03d}"
-                            " | Loss: {:.5f} | Correct: {:d}/{:d}"
+                            " | LR: {:.5f} | Loss: {:.5f} | Correct: {:d}/{:d}"
                         )
-                        self.logger.info(msg.format(epoch, batch_idx, loss, correct, size))
+                        self.logger.info(msg.format(epoch, batch_idx, scheduler.get_last_lr()[0], loss, correct, size))
                         if self.tb_logger:
                             self.tb_logger.add_scalar(
                                 "sGBM/Train_Loss", loss, total_iters
@@ -300,14 +316,14 @@ class _BaseSoftGradientBoosting(BaseModule):
             if test_loader:
                 flag = self._evaluate_during_fit(test_loader, epoch)
                 if flag:
-                    io.save(self, save_dir, self.logger)
+                    io.save(self, epoch + 1, [optimizer], scheduler, save_dir, self.logger, best_acc=self.best_acc)
 
             # Update the scheduler
             if self.use_scheduler_:
                 scheduler.step()
 
-        if save_model and not test_loader:
-            io.save(self, save_dir, self.logger)
+            if save_model:
+                io.save(self, epoch + 1, [optimizer], scheduler, save_dir, self.logger, best_acc=self.best_acc)
 
 
 @_soft_gradient_boosting_model_doc(
@@ -393,6 +409,12 @@ class SoftGradientBoostingClassifier(
         test_loader=None,
         save_model=True,
         save_dir=None,
+        retrain=False,
+        loaded_optimizers=None,
+        loaded_scheduler=None,
+        loaded_epoch=0,
+        loaded_est_idx=-1,
+        loaded_best_acc=-1,
     ):
         super().fit(
             train_loader=train_loader,
@@ -402,6 +424,12 @@ class SoftGradientBoostingClassifier(
             test_loader=test_loader,
             save_model=save_model,
             save_dir=save_dir,
+            retrain=retrain,
+            loaded_optimizers=loaded_optimizers,
+            loaded_scheduler=loaded_scheduler,
+            loaded_epoch=loaded_epoch,
+            loaded_est_idx=loaded_est_idx,
+            loaded_best_acc=loaded_best_acc,
         )
 
     @torchensemble_model_doc(

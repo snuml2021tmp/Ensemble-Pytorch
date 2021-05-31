@@ -18,7 +18,7 @@ from ._base import torchensemble_model_doc
 from .utils import io
 from .utils import set_module
 from .utils import operator as op
-
+import numpy as np
 
 __all__ = ["BaggingClassifier", "BaggingRegressor"]
 
@@ -87,11 +87,11 @@ def _parallel_fit_per_epoch(
 
                 msg = (
                     "Estimator: {:03d} | Epoch: {:03d} | Batch: {:03d}"
-                    " | Loss: {:.5f} | Correct: {:d}/{:d}"
+                    " | LR: {:.5f} | Loss: {:.5f} | Correct: {:d}/{:d}"
                 )
                 print(
                     msg.format(
-                        idx, epoch, batch_idx, loss, correct, subsample_size
+                        idx, epoch, batch_idx, cur_lr, loss, correct, subsample_size
                     )
                 )
             else:
@@ -146,32 +146,49 @@ class BaggingClassifier(BaseClassifier):
         test_loader=None,
         save_model=True,
         save_dir=None,
+        retrain=False,
+        loaded_optimizers=None,
+        loaded_scheduler=None,
+        loaded_epoch=0,
+        loaded_est_idx=-1,
+        loaded_best_acc=-1,
     ):
 
         self._validate_parameters(epochs, log_interval)
         self.n_outputs = self._decide_n_outputs(train_loader)
 
         # Instantiate a pool of base estimators, optimizers, and schedulers.
-        estimators = []
-        for _ in range(self.n_estimators):
-            estimators.append(self._make_estimator())
+        if not retrain:
+            estimators = []
+            for _ in range(self.n_estimators):
+                estimators.append(self._make_estimator())
+        else:
+            estimators = self.estimators_
 
-        optimizers = []
-        for i in range(self.n_estimators):
-            optimizers.append(
-                set_module.set_optimizer(
-                    estimators[i], self.optimizer_name, **self.optimizer_args
+        if not retrain:
+            optimizers = []
+            for i in range(self.n_estimators):
+                optimizers.append(
+                    set_module.set_optimizer(
+                        estimators[i], self.optimizer_name, **self.optimizer_args
+                    )
                 )
-            )
+        else:
+            assert loaded_optimizers is not None
+            optimizers = loaded_optimizers
 
         if self.use_scheduler_:
-            scheduler_ = set_module.set_scheduler(
-                optimizers[0], self.scheduler_name, **self.scheduler_args
-            )
+            if not retrain:
+                scheduler_ = set_module.set_scheduler(
+                    optimizers[0], self.scheduler_name, **self.scheduler_args
+                )
+            else:
+                assert loaded_scheduler is not None
+                scheduler_ = loaded_scheduler
 
         # Utils
         criterion = nn.CrossEntropyLoss()
-        best_acc = 0.0
+        best_acc = 0.0 if loaded_best_acc == -1 else loaded_best_acc
 
         # Internal helper function on pesudo forward
         def _forward(estimators, data):
@@ -186,7 +203,7 @@ class BaggingClassifier(BaseClassifier):
         with Parallel(n_jobs=self.n_jobs) as parallel:
 
             # Training loop
-            for epoch in range(epochs):
+            for epoch in np.array(list(range(epochs - loaded_epoch))) + loaded_epoch:
                 self.train()
 
                 if self.use_scheduler_:
@@ -222,6 +239,7 @@ class BaggingClassifier(BaseClassifier):
                     optimizers.append(optimizer)
 
                 # Validation
+                save_flag = False
                 if test_loader:
                     self.eval()
                     with torch.no_grad():
@@ -238,10 +256,9 @@ class BaggingClassifier(BaseClassifier):
 
                         if acc > best_acc:
                             best_acc = acc
+                            save_flag = True
                             self.estimators_ = nn.ModuleList()
                             self.estimators_.extend(estimators)
-                            if save_model:
-                                io.save(self, save_dir, self.logger)
 
                         msg = (
                             "Epoch: {:03d} | Validation Acc: {:.3f}"
@@ -263,10 +280,13 @@ class BaggingClassifier(BaseClassifier):
                     if self.use_scheduler_:
                         scheduler_.step()
 
+                if save_model and save_flag:
+                    io.save(self, epoch + 1, optimizers, scheduler_, save_dir, self.logger, best_acc)
+
         self.estimators_ = nn.ModuleList()
         self.estimators_.extend(estimators)
         if save_model and not test_loader:
-            io.save(self, save_dir, self.logger)
+            io.save(self, epoch + 1, optimizers, scheduler_, save_dir, self.logger, best_acc)
 
     @torchensemble_model_doc(item="classifier_evaluate")
     def evaluate(self, test_loader, return_loss=False):
